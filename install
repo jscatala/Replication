@@ -1,0 +1,240 @@
+#!/bin/bash
+#set -x
+######
+# Asume:
+#    - Script se ejecuta en maestro
+#    - En ambas máquinas los usuarios poseen acceso a SUDO
+#    - Postgres es 9.1
+#    - Ubicacion cluster (Maestro esclavo) /usr/local/data
+#    - Ubicacion WAL Maestro : /usr/local/data/archives/
+#    
+######
+
+#############################################################
+out(){
+        echo -e $1
+        exit 1
+}
+
+check () {
+        if [[ $1 -ne '0' ]]
+        then
+                out "[FAIL]\n\t $2"
+        else
+                echo "[DONE]"
+        fi
+}
+#
+#
+#
+#############################################################
+
+
+
+##################################
+#       DATOS DE USUARIO
+##################################
+user=$(whoami)
+
+read -s -p "Contraseña de $user: " user_pass
+echo
+read -s -p "Reingrese contraseña: " tmp
+echo
+if [[ "$user_pass" != "$tmp" ]]
+then
+	echo "ERROR: Contraseñas no coinciden"
+	exit 1
+fi
+
+##################################
+#    Verificar acceso SUDO 
+##################################
+	
+echo -n "Acceso a SUDO: "
+tmp=$(echo "$user_pass" | sudo -S -b whoami )
+if [[ "$tmp" != "root" ]]
+then
+	echo -e "[FAIL] \n\t Error al acceder a sudo"
+	exit 1
+else
+	echo " [DONE]"
+fi
+
+##################################
+#       RUTA CONFIGURACION 
+##################################
+tmpp='N'
+
+while [[ ! "$tmp" =~ ^[yY]$ ]]
+do
+	read -p "Desea ingresar manualmente la ruta de los archivos de configuracion?(Y/N)[N] " tmp
+
+	if [[ "$tmp" =~ ^[Yy]$ ]]
+	then
+		cfg_pth=$(echo ~)"/HA/"
+		read -p "Ruta a la carpeta '[$cfg_pth]': " cfg_pth
+	else
+		tmpp=$(dpkg -s realpath | grep Status)
+		if [[ "$tmpp" != "Status: install ok installed" ]]
+		then
+			echo "realpath no esta instalado"
+			read -p "Desea instalar realpath?(Y/N)[Y] " tmpp
+			if [[ "$tmpp" =~  ^[Yy]$ ]]
+			then
+				echo '$user_pass' | sudo apt-get install realpath -y
+				echo $1
+			else
+				echo 'ERROR: realpath no instalado. Saliendo'
+				exit 1
+			fi
+		else
+			echo "Verificando realpath: [DONE]"
+		fi
+		file_pth=$(realpath $0)
+		cfg_pth=$(dirname $file_pth)"/"
+	fi
+
+	read -p "La ruta esta correcta '$cfg_pth' (Y/N)[N] " tmp
+
+	if [ ! -d "$cfg_pth" ]
+	then
+        	echo "ERROR:  La ruta $config_path no existe."
+		exit 1
+	fi
+done
+
+
+##################################
+#     Maestro Esclavo 
+##################################
+tmp="N"
+
+while [[ ! "$tmp" =~  ^[Yy]$ ]]
+do
+	read -p "Ingrese usuario en servidor primario: " master_user
+	read -p "Ingrese IP del servidor primario: " master_ip
+	read -p "Acceso al maestro: $master_user@$master_ip (Y/N) [N] " tmp
+done
+
+tmp="N"
+
+while [[ ! "$tmp" =~  ^[Yy]$ ]]
+do
+	read -p "Ingrese usuario en servidor secundario: " slave_user
+	read -p "Ingrese IP del servidor secundario: " slave_ip
+	read -p "Acceso al secundario: $slave_user@$slave_ip (Y/N) [N] " tmp
+
+	if [[ "$master_ip" == "$slave_ip" ]]
+	then
+		echo "ERROR: Conflicto de IP's. Maestro: $master_ip , Esclavo: $slave_ip."
+		tmp="N"
+	fi
+done
+
+##################################
+#     Postgres/Maestro
+##################################
+echo -n "Instalacion de postgresql-9.1 "
+
+dpkg -s postgresql-9.1 > /dev/null 2>&1
+
+if [[ $? -ne '0' ]]
+then
+	echo "$user_pass" | sudo -S apt-get install -y postgresql-9.1
+	check $? "No se pudo instalar el paquete postgresql-9.1. Saliendo"
+else
+	echo "[DONE]"
+fi
+
+echo -n "Instalacion de postgresql-contrib-9.1: "
+dpkg -s postgresql-contrib-9.1 > /dev/null 2>&1
+
+if [[ $? -ne '0' ]]
+then
+	echo "$user_pass" | sudo -S apt-get install -y postgresql-contrib-9.1
+	check $? "No se pudo instalar el paquete postgresql-contrib-9.1. Saliendo"
+else
+	echo "[DONE]"
+fi
+
+tmp='N'
+while [[ ! "$tmp" =~  ^[Yy]$ ]]
+do
+	read -p "Donde desea ubicar el Cluster Maestro (/usr/local/data/) " master_cl
+
+	if [[ -z "$master_cl" ]]
+	then
+		master_cl='/usr/local/data/'
+	fi
+
+	read -p "Esta correcta la ruta $master_cl para el cluster?(Y/N)[N] " tmp
+
+	if [[ ! "$tmp" =~ ^[Nn]$ ]]
+	then 
+		if [[ -d $master_cl ]]
+		then
+			echo "ERROR: El directorio $master_cl ya existe."
+			read -p "Desea igualmente utilizar este? Esto borrará todos los datos existentes (Y/N) [N] " tmp
+			if [[ "$tmp" =~ ^[Yy]$ ]]
+			then
+				echo '$user_pass' | sudo -S -b rm -rf $master_cl
+			fi
+		fi
+	fi	
+done
+
+##################################
+#   Postgres/Maestro/Directorio
+##################################
+
+echo -n "Creando directorio $master_cl: "
+echo "$user_pass" | sudo -S -b mkdir $master_cl
+check $? "Problemas al crear el directorio $master_cl"
+
+echo -n "Modificando permisos de directorio \"$master_cl\" "
+echo "$user_pass" | sudo -S -b chown postgres:postgres $master_cl
+check $? "Problemas para modificar permisos en directorio \"$master_cl\""
+
+##################################
+#   Postgres/Maestro/Password
+##################################
+
+echo -n "Generando contraseña temporal para usuario postgres "
+psql_pass=$(tr -cd '[:alnum:]' < /dev/urandom | fold -w30 | head -n1)
+check $? "Problemas al generar contraseña temporal para postgres. Saliendo..."
+
+echo -n "Cambiando contraseña para postgres "
+echo "postgres:$psql_pass" | sudo chpasswd
+check $? "Problemas al cambiar la contraseña. Saliendo..."
+
+##################################
+#   Postgres/Maestro/Init_CL
+##################################
+echo -n "Chequeando el estado del servicio Postgresql: "
+tmp=$(sudo service postgresql status | awk -F " " '{print $4}')
+echo $tmp
+
+while [[ "$tmp" != "down" ]]
+do
+	if [[ "$tmp" == "online" ]]
+	then
+		tmpp="N"
+		read -p "Es necesario detener postgresql. Desea hacerlo?()Y/N) [N] " tmpp
+		if [[ "$tmpp" =~ ^[Yy]$ ]]
+		then
+			echo -n "Deteniendo el servicio de Postgresql "
+			echo "$user_pass" | sudo -S -b service Postgresql stop
+			check $? "Problemas al intentar detener Postgresql"
+			tmp="down"
+		else
+			echo "ERROR: problemas con Postgresql. Saliendo..."
+			exit 1
+		fi
+	elif [[ "$tmp" == "down" ]]
+	then
+		tmp="down"
+	else
+		echo "ERROR: Estado de Postgresql no reconocido. Saliendo..."
+		exit 1
+	fi
+done

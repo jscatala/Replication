@@ -1,0 +1,20 @@
+Content:
+========
+
+  - install
+
+  - Master(Folder)
+	- create_db
+	- replica
+	- postgresql.conf
+	- pg_hba.conf
+  
+  - Standby(Folder)
+	- postgresql.conf
+	- pg_hba.conf
+	- recovery.conf
+
+  - Tests(Folder)
+	run_test
+	receiver.py
+	sender.py
