@@ -1,0 +1,1 @@
+sudo su - postgres -c "/usr/lib/postgresql/9.1/bin/pg_ctl -w -D /usr/local/data $1"

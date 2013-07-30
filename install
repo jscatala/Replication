@@ -1,5 +1,5 @@
 #!/bin/bash
-#set -x
+set -x
 ######
 # Asume:
 #    - Script se ejecuta en maestro
@@ -24,9 +24,13 @@ check () {
                 echo "[DONE]"
         fi
 }
-#
-#
-#
+
+trim() {
+       local var=$@
+       var="${var#"${var%%[![:space:]]*}"}"   # remove leading whitespace characters
+       var="${var%"${var##*[![:space:]]}"}"   # remove trailing whitespace characters
+       echo -n "$var"
+}
 #############################################################
 
 
@@ -177,7 +181,7 @@ do
 			read -p "Desea igualmente utilizar este? Esto borrará todos los datos existentes (Y/N) [N] " tmp
 			if [[ "$tmp" =~ ^[Yy]$ ]]
 			then
-				echo '$user_pass' | sudo -S -b rm -rf $master_cl
+				echo '$user_pass' | sudo -S rm -rf $master_cl
 			fi
 		fi
 	fi	
@@ -188,11 +192,11 @@ done
 ##################################
 
 echo -n "Creando directorio $master_cl: "
-echo "$user_pass" | sudo -S -b mkdir $master_cl
+echo "$user_pass" | sudo -S mkdir $master_cl
 check $? "Problemas al crear el directorio $master_cl"
 
 echo -n "Modificando permisos de directorio \"$master_cl\" "
-echo "$user_pass" | sudo -S -b chown postgres:postgres $master_cl
+echo "$user_pass" | sudo -S chown postgres:postgres $master_cl
 check $? "Problemas para modificar permisos en directorio \"$master_cl\""
 
 ##################################
@@ -210,6 +214,8 @@ check $? "Problemas al cambiar la contraseña. Saliendo..."
 ##################################
 #   Postgres/Maestro/Init_CL
 ##################################
+initdb=/usr/lib/postgresql/9.1/bin/initdb
+
 echo -n "Chequeando el estado del servicio Postgresql: "
 tmp=$(sudo service postgresql status | awk -F " " '{print $4}')
 echo $tmp
@@ -219,11 +225,11 @@ do
 	if [[ "$tmp" == "online" ]]
 	then
 		tmpp="N"
-		read -p "Es necesario detener postgresql. Desea hacerlo?()Y/N) [N] " tmpp
+		read -p "Es necesario detener postgresql. Desea hacerlo?(Y/N) [N] " tmpp
 		if [[ "$tmpp" =~ ^[Yy]$ ]]
 		then
 			echo -n "Deteniendo el servicio de Postgresql "
-			echo "$user_pass" | sudo -S -b service Postgresql stop
+			echo "$user_pass" | sudo -S service postgresql stop > /dev/null 2>&1
 			check $? "Problemas al intentar detener Postgresql"
 			tmp="down"
 		else
@@ -238,3 +244,35 @@ do
 		exit 1
 	fi
 done
+
+if [[ -x "$initdb" ]]
+then
+    echo -n "Inicializando Cluster: " 
+    echo "$user_pass" | sudo -S su - postgres -c "$initdb -D $master_cl"
+    wait $!
+    check $? "Problemas al inicializar el cluster. Saliendo..."
+else
+    out "Problemas con $initdb. Saliendo..."
+fi
+
+##################################
+#   Postgres/Maestro/pg_ctl_start
+##################################
+pgctl="/usr/lib/postgresql/9.1/bin/pg_ctl"
+
+if [[ -x $pgctl ]]
+then
+    echo -n "Iniciando servidor postgresql: "
+    echo "$user_pass" | sudo -S su - postgres -c "$pgctl -w -D $master_cl start"
+    wait $!
+    check $? "Problemas al inicial servidor postgresql"
+else
+    out "Problemas para iniciar servidor postgresql. Saliendo"
+fi
+
+tmp=$(echo "$user_pass" | sudo -S su - postgres -c "psql -c 'show data_directory'" | grep local)
+tmp=$(trim $tmp)
+if [[ "$tmp/" != "$master_cl" ]]
+then
+    out "Problemas al verificar directorio de datos en postgresql. Saliendo ..."
+fi
