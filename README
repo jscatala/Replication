@@ -10,17 +10,16 @@ en postgresql 9.1 con un servidor standby
 Content:
 ========
 
-  - install
+  - install: config and all shit
 
   - Master(Folder)
-	- create_db
-	- replica
-	- postgresql.conf
-	- pg_hba.conf
+	- create_db: Crea una bd de ejemplo
+	- replica: crea una replica
+	- postgresql.conf: postgres
+	- pg_hba.conf: postgres
   
   - Standby(Folder)
 	- postgresql.conf
-	- pg_hba.conf
 	- recovery.conf
 
   - Tests(Folder)

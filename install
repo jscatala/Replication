@@ -10,6 +10,11 @@
 #    
 ######
 
+######
+# TO DO:
+#   - Chequear si postgres esta corriendo
+#####
+
 #############################################################
 out(){
         echo -e $1
@@ -25,12 +30,57 @@ check () {
         fi
 }
 
+installed (){
+    local tmpp=$(dpkg -s $1 | grep Status )
+    if [[ "$tmpp" != "Status: install ok installed" ]]
+    then
+        read -p "$1 No instalado. Desea instalar $1?(Y/N)[N] " tmpp
+        if [[ "$tmpp" =~  ^[Yy]$ ]]
+        then
+            echo -n "Instalando $1: "
+            echo '$2' | sudo -S apt-get install $1 -y > /dev/null
+            check $? "Error: \n\t $1 No instalado."
+        else
+            out "Error: \n\t$1 no instalado."
+        fi
+    else
+        echo "Verificando $1: [DONE]"
+    fi
+
+}
+
+remove (){
+    local tmp='N'
+    read -p "Desea desinstalar $1: (Y/N) [N] " tmp
+    if [[ "$tmp" =~ ^[yY]$ ]]
+    then
+        echo "$2" | sudo -S apt-get remove -y $1
+        check $? "Error; \n\t No se pudo desinstalar $1"
+    fi
+}
 trim() {
        local var=$@
        var="${var#"${var%%[![:space:]]*}"}"   # remove leading whitespace characters
        var="${var%"${var##*[![:space:]]}"}"   # remove trailing whitespace characters
        echo -n "$var"
 }
+
+valida_ip (){
+    local  ip=$1
+    local  stat=1
+
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; 
+    then
+        OIFS=$IFS
+        IFS='.'
+        ip=($ip)
+        IFS=$OIFS
+        [[ ${ip[0]} -le 255 && ${ip[1]} -le 255 \
+        && ${ip[2]} -le 255 && ${ip[3]} -le 255 ]]
+        stat=$?
+    fi
+    return $stat
+                                                                        }
 #############################################################
 
 
@@ -40,35 +90,110 @@ trim() {
 ##################################
 user=$(whoami)
 
-read -s -p "Contraseña de $user: " user_pass
-echo
-read -s -p "Reingrese contraseña: " tmp
-echo
-if [[ "$user_pass" != "$tmp" ]]
-then
-	echo "ERROR: Contraseñas no coinciden"
-	exit 1
-fi
+tmp='n'
 
+while [[ "$tmp" != "Y" ]]
+do
+    read -s -p "Contraseña de $user: " user_pass
+    echo
+    read -s -p "Reingrese contraseña: " tmp
+    echo
+
+    if [[ "$user_pass" != "$tmp" ]]
+    then
+        echo -e "ERROR: \n\tContraseñas no coinciden"
+    else
+        tmp="Y"
+    fi
+done
+echo ""
 ##################################
 #    Verificar acceso SUDO 
 ##################################
 	
 echo -n "Acceso a SUDO: "
-tmp=$(echo "$user_pass" | sudo -S -b whoami )
+tmp=$(echo "$user_pass" | sudo -S whoami )
 if [[ "$tmp" != "root" ]]
 then
-	echo -e "[FAIL] \n\t Error al acceder a sudo"
-	exit 1
+	out "Error:\n\t No se logro acceder como sudo"
 else
 	echo " [DONE]"
 fi
+
+echo ""
+##################################
+#     Maestro Esclavo 
+##################################
+tmp="N"
+
+while [[ ! "$tmp" =~  ^[Yy]$ ]]
+do
+    user_ip='localhost'
+	echo "Usuario para servidor primario: $user"
+    valida_ip $user_ip
+    while [[ $? != '0' ]]
+    do
+	    read -p "Ingrese IP del servidor primario: " user_ip
+        valida_ip $user_ip
+    done
+	read -p "Acceso al maestro: $user@$user_ip (Y/N) [N] " tmp
+done
+echo ""
+
+tmp="N"
+
+while [[ ! "$tmp" =~  ^[Yy]$ ]]
+do
+	read -p "Ingrese usuario en servidor secundario: " slave_user
+    slave_ip='localhost'
+    valida_ip $slave_ip
+    while [[ $? != '0' ]]
+    do
+	    read -p "Ingrese IP del servidor secundario: " slave_ip
+        valida_ip $slave_ip
+    done
+    read -p "Ingrese Mascara de red abreviada: " slave_mask
+    read -s -p "Ingrese Contraseña para usuario $slave_user: " slave_pass
+    echo ""
+    read -s -p "Reingrese contraseña: " tmpp
+    echo ""
+
+    if [[ "$slave_pass" == "$tmpp" ]]
+    then
+	    read -p "Acceso al secundario: $slave_user@$slave_ip/$slave_mask (Y/N) [N] " tmp
+
+        tmpp=$(ifconfig | grep $slave_ip | wc -l)
+	    if [[ "$user_ip" == "$slave_ip" || "$tmpp" -gt "0" ]]
+	    then
+		    echo -e "ERROR: \n\tConflicto de IP's. Maestro: $user_ip , Esclavo: $slave_ip"
+            echo ""
+		    tmp="N"
+	    fi
+    else
+        echo -e "ERROR: \n\tContraseñas no coinciden. Reintente"
+    fi
+done
+echo ""
+
+tmp='N'
+
+read -p "Desea que el script verifique conectividad entre servidores? (Y/N)[N] " tmp
+if [[ "$tmp" =~ ^[yY]$ ]]
+then
+    installed "sshpass" $user_pass
+    wait $!
+    echo -n "Probando conectividad: "
+    #-oStrictHostKeyChecking=no host key check
+    sshpass -p $slave_pass ssh -oStrictHostKeyChecking=no $slave_user@$slave_ip ls > /dev/null
+    check $? "Error: \n\t No se pudo comprobar conectividad por ssh entre servidores"
+fi
+echo ""
 
 ##################################
 #       RUTA CONFIGURACION 
 ##################################
 tmpp='N'
-
+tmp='N'
 while [[ ! "$tmp" =~ ^[yY]$ ]]
 do
 	read -p "Desea ingresar manualmente la ruta de los archivos de configuracion?(Y/N)[N] " tmp
@@ -106,41 +231,25 @@ do
 		exit 1
 	fi
 done
+echo ""
 
+###################################
+##  Instalacion Postgres/Contrib
+###################################
+echo -n "Probando SUDO en esclavo: "
+tmp=$(sshpass -p $slave_pass ssh -oStrictHostKeyChecking=no $slave_user@$slave_ip echo "$slave_pass" | sudo -S whoami )
+if [[ "$tmp" != "root" ]]
+then
+    out "Error:\n\t No se logro acceder como sudo en esclavo"
+else
+    echo " [DONE]"
+fi
 
-##################################
-#     Maestro Esclavo 
-##################################
-tmp="N"
+echo ""
 
-while [[ ! "$tmp" =~  ^[Yy]$ ]]
-do
-	read -p "Ingrese usuario en servidor primario: " master_user
-	read -p "Ingrese IP del servidor primario: " master_ip
-	read -p "Acceso al maestro: $master_user@$master_ip (Y/N) [N] " tmp
-done
+echo -n "Instalacion de postgresql-9.1: "
 
-tmp="N"
-
-while [[ ! "$tmp" =~  ^[Yy]$ ]]
-do
-	read -p "Ingrese usuario en servidor secundario: " slave_user
-	read -p "Ingrese IP del servidor secundario: " slave_ip
-	read -p "Acceso al secundario: $slave_user@$slave_ip (Y/N) [N] " tmp
-
-	if [[ "$master_ip" == "$slave_ip" ]]
-	then
-		echo "ERROR: Conflicto de IP's. Maestro: $master_ip , Esclavo: $slave_ip."
-		tmp="N"
-	fi
-done
-
-##################################
-#     Postgres/Maestro
-##################################
-echo -n "Instalacion de postgresql-9.1 "
-
-dpkg -s postgresql-9.1 > /dev/null 2>&1
+dpkg -s postgresql-9.1 > /dev/null
 
 if [[ $? -ne '0' ]]
 then
@@ -150,8 +259,20 @@ else
 	echo "[DONE]"
 fi
 
+echo -n "Instalacion de postgresql-9.1 en esclavo: "
+
+sshpass -p $slave_pass ssh -oStrictHostKeyChecking=no $slave_user@$slave_ip dpkg -s postgresql-9.1 > /dev/null
+
+if [[ $? -ne '0' ]]
+then
+    sshpass -p $slave_pass ssh -oStrictHostKeyChecking=no $slave_user@$slave_ip echo "$slave_pass" | sudo -S apt-get install -y postgresql-9.1 > /dev/null
+	check $? "No se pudo instalar el paquete postgresql-9.1i en esclavo. Saliendo"
+else
+	echo "[DONE]"
+fi
+
 echo -n "Instalacion de postgresql-contrib-9.1: "
-dpkg -s postgresql-contrib-9.1 > /dev/null 2>&1
+dpkg -s postgresql-contrib-9.1 > /dev/null
 
 if [[ $? -ne '0' ]]
 then
@@ -160,169 +281,215 @@ then
 else
 	echo "[DONE]"
 fi
+echo -n "Instalacion de postgresql-contrib-9.1 en esclavo: "
+sshpass -p $slave_pass ssh -oStrictHostKeyChecking=no $slave_user@$slave_ip dpkg -s postgresql-contrib-9.1 > /dev/null
 
-tmp='N'
-while [[ ! "$tmp" =~  ^[Yy]$ ]]
+if [[ $? -ne '0' ]]
+then
+	sshpass -p $slave_pass ssh -oStrictHostKeyChecking=no $slave_user@$slave_ip echo "$slave_pass" | sudo -S apt-get install -y postgresql-contrib-9.1 > /dev/null
+	check $? "No se pudo instalar el paquete postgresql-contrib-9.1 en esclavo. Saliendo"
+else
+	echo "[DONE]"
+fi
+
+###################################
+## Generando llaves 
+###################################
+
+
+#tmp='N'
+#while [[ ! "$tmp" =~  ^[Yy]$ ]]
+#do
+#	read -p "Donde desea ubicar el Cluster Maestro (/usr/local/data/) " master_cl
+#
+#    #-z is empty
+#	if [[ -z "$master_cl" ]]
+#	then
+#		master_cl='/usr/local/data/'
+#	fi
+#
+#	read -p "Esta correcta la ruta $master_cl para el cluster?(Y/N)[N] " tmp
+#
+#	if [[ ! "$tmp" =~ ^[Nn]$ ]]
+#	then 
+#		if [[ -d $master_cl ]]
+#		then
+#			echo "ERROR: El directorio $master_cl ya existe."
+#			read -p "Desea igualmente utilizar este? Esto borrará todos los datos existentes (Y/N) [N] " tmp
+#			if [[ "$tmp" =~ ^[Yy]$ ]]
+#			then
+#				echo '$user_pass' | sudo -S rm -rf $master_cl
+#			fi
+#		fi
+#	fi	
+#done
+#
+###################################
+##   Postgres/Maestro/Directorio
+###################################
+#
+#echo -n "Creando directorio $master_cl: "
+#echo "$user_pass" | sudo -S mkdir $master_cl
+#check $? "Problemas al crear el directorio $master_cl"
+#
+#echo -n "Modificando permisos de directorio \"$master_cl\" "
+#echo "$user_pass" | sudo -S chown postgres:postgres $master_cl
+#check $? "Problemas para modificar permisos en directorio \"$master_cl\""
+#
+###################################
+##   Postgres/Maestro/Password
+###################################
+#
+#echo -n "Generando contraseña temporal para usuario postgres "
+#psql_pass=$(tr -cd '[:alnum:]' < /dev/urandom | fold -w30 | head -n1)
+#check $? "Problemas al generar contraseña temporal para postgres. Saliendo..."
+#
+#echo -n "Cambiando contraseña para postgres "
+#echo "postgres:$psql_pass" | sudo chpasswd
+#check $? "Problemas al cambiar la contraseña. Saliendo..."
+#
+###################################
+##   Postgres/Maestro/Init_CL
+###################################
+#initdb=/usr/lib/postgresql/9.1/bin/initdb
+#
+#echo -n "Chequeando el estado del servicio Postgresql: "
+#tmp=$(sudo service postgresql status | awk -F " " '{print $4}')
+#echo $tmp
+#
+#while [[ "$tmp" != "down" ]]
+#do
+#	if [[ "$tmp" == "online" ]]
+#	then
+#		tmpp="N"
+#		read -p "Es necesario detener postgresql. Desea hacerlo?(Y/N) [N] " tmpp
+#		if [[ "$tmpp" =~ ^[Yy]$ ]]
+#		then
+#			echo -n "Deteniendo el servicio de Postgresql "
+#			echo "$user_pass" | sudo -S service postgresql stop > /dev/null 2>&1
+#			check $? "Problemas al intentar detener Postgresql"
+#			tmp="down"
+#		else
+#			echo "ERROR: problemas con Postgresql. Saliendo..."
+#			exit 1
+#		fi
+#	elif [[ "$tmp" == "down" ]]
+#	then
+#		tmp="down"
+#	else
+#		echo "ERROR: Estado de Postgresql no reconocido. Saliendo..."
+#		exit 1
+#	fi
+#done
+#
+#if [[ -x "$initdb" ]]
+#then
+#    echo -n "Inicializando Cluster: " 
+#    echo "$user_pass" | sudo -S su - postgres -c "$initdb -D $master_cl" > /dev/null 2>&1
+#    wait $!
+#    check $? "Problemas al inicializar el cluster. Saliendo..."
+#else
+#    out "Problemas con $initdb. Saliendo..."
+#fi
+#
+###################################
+##   Postgres/Maestro/pg_ctl_start
+###################################
+#pgctl="/usr/lib/postgresql/9.1/bin/pg_ctl"
+#
+#if [[ -x $pgctl ]]
+#then
+#    echo -n "Iniciando servidor postgresql: "
+#    echo "$user_pass" | sudo -S su - postgres -c "$pgctl -w -D $master_cl start" > /dev/null 2>&1
+#    wait $!
+#    check $? "Problemas al inicial servidor postgresql"
+#else
+#    out "Problemas para iniciar servidor postgresql. Saliendo"
+#fi
+#
+#tmp=$(echo "$user_pass" | sudo -S su - postgres -c "psql -c 'show data_directory'" | grep local)
+#tmp=$(trim $tmp)
+#if [[ "$tmp/" != "$master_cl" ]]
+#then
+#    out "Problemas al verificar directorio de datos en postgresql. Saliendo ..."
+#fi
+#
+###################################
+##   Postgres/Maestro/alter pass
+###################################
+#echo "Modificando contraseña en Cluster"
+#master_pass_cl='n'
+#tmpp='s'
+#while [[ "$master_pass_cl" != "$tmpp" ]]
+#do
+#    read -s -p "Ingrese Nueva Contraseña acceder como postgres: " master_pass_cl
+#    echo ""
+#    read -s -p "Reingrese nueva contraseña: " tmpp
+#    if [[ "$master_pass_cl" != "$tmpp" ]]
+#    then
+#        echo "Error: Contraseñas no coinciden."
+#    fi
+#done
+#echo ""
+#echo -n "Modificando contraseña en cluster: "
+#echo "$user_pass" | sudo -S su postgres -c "psql -c \"alter user postgres with encrypted password '$master_pass_cl';\"" > /dev/null 2>&1
+#check $? "Problemas al modificar contraseña de postgres en cluster. Saliendo..."
+#
+#
+###################################
+##   Postgres/Maestro/rc
+###################################
+#
+#read -p "Desea configurar postgres para que inicie el cluster por defecto? [Y/N](N) " tmp
+#
+#if [[ "$tmp" =~ ^[yY]$ ]]
+#then
+#    echo "$user_pass" | sudo -S update-rc.d -f postgresql remove > /dev/null 2>&1
+#    echo -n "Modificando update-rc: "
+#    check $? "Problemas al ejecutar update-rc.d y tratar de eliminar postgres. Saliendo..."
+#    echo -n "Copiando rc.local: "
+#    echo "$user_pass" | sudo -S cp /etc/rc.local ./rc.local.old
+#    check $? "Problemas el copiar rc.local. Saliendo..."
+#    echo -n "Modificando rc.local: "
+#    echo "$user_pass" | sudo -S head -n -1 /etc/rc.local  > /tmp/rc.tmp && echo "su - postgres -c '/usr/lib/postgresql/9.1/bin/pg_ctl -w -D $master_cl start'" >> /tmp/rc.tmp && echo -e "\nexit 0 " >> /tmp/rc.tmp && echo "$user_pass" | sudo -S mv /tmp/rc.tmp /etc/rc.local
+#    check $? "Problemas al modificar rc.local. Saliendo..."
+#else
+#    echo "Recuerde que debe iniciar el cluster de forma manual o con algun otro procedimiento."
+#fi
+#
+###################################
+##Postgres/Maestro/postgresql.conf
+###################################
+#tmp=$master_cl"archives/"
+#echo -n "Donde desea ubicar los archivos WAL? ($tmp) " archive_pth
+#
+#if [[ -z $archive_pth ]] 
+#then
+#    archive_pth=$tmp
+#fi
+#
+#
+#
+###################################
+## Postgres/Maestro/pg_hba.conf
+###################################
+#echo -n "Modificando pg_hba.conf: "
+#echo "$user_pass" | sudo -S su - postgres -c "echo -e 'host\t replication \t postgres\t$slave_ip/$slave_mask\ttrust' >> $master_cl'pg_hba.conf'"
+#check $? "Problemas al modificar pg_hba.conf"
+##################################
+#   Generando llaves ssh 
+##################################
+#echo "$user_pass" | sudo -S su - postgres 
+
+
+
+##################################
+#  Eliminando extras 
+##################################
+
+for i in "sshpass" "realpath"
 do
-	read -p "Donde desea ubicar el Cluster Maestro (/usr/local/data/) " master_cl
-
-	if [[ -z "$master_cl" ]]
-	then
-		master_cl='/usr/local/data/'
-	fi
-
-	read -p "Esta correcta la ruta $master_cl para el cluster?(Y/N)[N] " tmp
-
-	if [[ ! "$tmp" =~ ^[Nn]$ ]]
-	then 
-		if [[ -d $master_cl ]]
-		then
-			echo "ERROR: El directorio $master_cl ya existe."
-			read -p "Desea igualmente utilizar este? Esto borrará todos los datos existentes (Y/N) [N] " tmp
-			if [[ "$tmp" =~ ^[Yy]$ ]]
-			then
-				echo '$user_pass' | sudo -S rm -rf $master_cl
-			fi
-		fi
-	fi	
+    remove $i $user_pass
 done
 
-##################################
-#   Postgres/Maestro/Directorio
-##################################
-
-echo -n "Creando directorio $master_cl: "
-echo "$user_pass" | sudo -S mkdir $master_cl
-check $? "Problemas al crear el directorio $master_cl"
-
-echo -n "Modificando permisos de directorio \"$master_cl\" "
-echo "$user_pass" | sudo -S chown postgres:postgres $master_cl
-check $? "Problemas para modificar permisos en directorio \"$master_cl\""
-
-##################################
-#   Postgres/Maestro/Password
-##################################
-
-echo -n "Generando contraseña temporal para usuario postgres "
-psql_pass=$(tr -cd '[:alnum:]' < /dev/urandom | fold -w30 | head -n1)
-check $? "Problemas al generar contraseña temporal para postgres. Saliendo..."
-
-echo -n "Cambiando contraseña para postgres "
-echo "postgres:$psql_pass" | sudo chpasswd
-check $? "Problemas al cambiar la contraseña. Saliendo..."
-
-##################################
-#   Postgres/Maestro/Init_CL
-##################################
-initdb=/usr/lib/postgresql/9.1/bin/initdb
-
-echo -n "Chequeando el estado del servicio Postgresql: "
-tmp=$(sudo service postgresql status | awk -F " " '{print $4}')
-echo $tmp
-
-while [[ "$tmp" != "down" ]]
-do
-	if [[ "$tmp" == "online" ]]
-	then
-		tmpp="N"
-		read -p "Es necesario detener postgresql. Desea hacerlo?(Y/N) [N] " tmpp
-		if [[ "$tmpp" =~ ^[Yy]$ ]]
-		then
-			echo -n "Deteniendo el servicio de Postgresql "
-			echo "$user_pass" | sudo -S service postgresql stop > /dev/null 2>&1
-			check $? "Problemas al intentar detener Postgresql"
-			tmp="down"
-		else
-			echo "ERROR: problemas con Postgresql. Saliendo..."
-			exit 1
-		fi
-	elif [[ "$tmp" == "down" ]]
-	then
-		tmp="down"
-	else
-		echo "ERROR: Estado de Postgresql no reconocido. Saliendo..."
-		exit 1
-	fi
-done
-
-if [[ -x "$initdb" ]]
-then
-    echo -n "Inicializando Cluster: " 
-    echo "$user_pass" | sudo -S su - postgres -c "$initdb -D $master_cl" > /dev/null 2>&1
-    wait $!
-    check $? "Problemas al inicializar el cluster. Saliendo..."
-else
-    out "Problemas con $initdb. Saliendo..."
-fi
-
-##################################
-#   Postgres/Maestro/pg_ctl_start
-##################################
-pgctl="/usr/lib/postgresql/9.1/bin/pg_ctl"
-
-if [[ -x $pgctl ]]
-then
-    echo -n "Iniciando servidor postgresql: "
-    echo "$user_pass" | sudo -S su - postgres -c "$pgctl -w -D $master_cl start" > /dev/null 2>&1
-    wait $!
-    check $? "Problemas al inicial servidor postgresql"
-else
-    out "Problemas para iniciar servidor postgresql. Saliendo"
-fi
-
-tmp=$(echo "$user_pass" | sudo -S su - postgres -c "psql -c 'show data_directory'" | grep local)
-tmp=$(trim $tmp)
-if [[ "$tmp/" != "$master_cl" ]]
-then
-    out "Problemas al verificar directorio de datos en postgresql. Saliendo ..."
-fi
-
-##################################
-#   Postgres/Maestro/alter pass
-##################################
-echo "Modificando contraseña en Cluster"
-master_pass_cl='n'
-tmpp='s'
-while [[ "$master_pass_cl" != "$tmpp" ]]
-do
-    read -s -p "Ingrese Nueva Contraseña acceder como postgres: " master_pass_cl
-    echo ""
-    read -s -p "Reingrese nueva contraseña: " tmpp
-    if [[ "$master_pass_cl" != "$tmpp" ]]
-    then
-        echo "Error: Contraseñas no coinciden."
-    fi
-done
-echo ""
-echo -n "Modificando contraseña en cluster: "
-echo "$user_pass" | sudo -S su postgres -c "psql -c \"alter user postgres with encrypted password '$master_pass_cl';\"" > /dev/null 2>&1
-check $? "Problemas al modificar contraseña de postgres en cluster. Saliendo..."
-
-
-##################################
-#   Postgres/Maestro/rc
-##################################
-
-read -p "Desea configurar postgres para que inicie el cluster por defecto? [Y/N](N) " tmp
-
-if [[ "$tmp" =~ ^[yY]$ ]]
-then
-    echo "$user_pass" | sudo -S update-rc.d -f postgresql remove > /dev/null 2>&1
-    echo -n "Modificando update-rc: "
-    check $? "Problemas al ejecutar update-rc.d y tratar de eliminar postgres. Saliendo..."
-    echo -n "Copiando rc.local: "
-    echo "$user_pass" | sudo -S cp /etc/rc.local ./rc.local.old
-    check $? "Problemas el copiar rc.local. Saliendo..."
-    echo -n "Modificando rc.local: "
-    echo "$user_pass" | sudo -S head -n -1 /etc/rc.local  > /tmp/rc.tmp && echo "su - postgres -c '/usr/lib/postgresql/9.1/bin/pg_ctl -w -D /usr/local/data/ start'" >> /tmp/rc.tmp && echo -e "\nexit 0 " >> /tmp/rc.tmp && echo "$user_pass" | sudo -S mv /tmp/rc.tmp /etc/rc.local
-else
-    echo "Recuerde que debe iniciar el cluster de forma manual o con algun otro procedimiento."
-fi
-
-##################################
-#Postgres/Maestro/postgresql.conf
-##################################
-##################################
-# Postgres/Maestro/pg_hba.conf
-##################################
-
+exit 0 
