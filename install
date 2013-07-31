@@ -1,5 +1,5 @@
 #!/bin/bash
-set -x
+#set -x
 ######
 # Asume:
 #    - Script se ejecuta en maestro
@@ -248,7 +248,7 @@ done
 if [[ -x "$initdb" ]]
 then
     echo -n "Inicializando Cluster: " 
-    echo "$user_pass" | sudo -S su - postgres -c "$initdb -D $master_cl"
+    echo "$user_pass" | sudo -S su - postgres -c "$initdb -D $master_cl" > /dev/null 2>&1
     wait $!
     check $? "Problemas al inicializar el cluster. Saliendo..."
 else
@@ -263,7 +263,7 @@ pgctl="/usr/lib/postgresql/9.1/bin/pg_ctl"
 if [[ -x $pgctl ]]
 then
     echo -n "Iniciando servidor postgresql: "
-    echo "$user_pass" | sudo -S su - postgres -c "$pgctl -w -D $master_cl start"
+    echo "$user_pass" | sudo -S su - postgres -c "$pgctl -w -D $master_cl start" > /dev/null 2>&1
     wait $!
     check $? "Problemas al inicial servidor postgresql"
 else
@@ -276,3 +276,53 @@ if [[ "$tmp/" != "$master_cl" ]]
 then
     out "Problemas al verificar directorio de datos en postgresql. Saliendo ..."
 fi
+
+##################################
+#   Postgres/Maestro/alter pass
+##################################
+echo "Modificando contraseña en Cluster"
+master_pass_cl='n'
+tmpp='s'
+while [[ "$master_pass_cl" != "$tmpp" ]]
+do
+    read -s -p "Ingrese Nueva Contraseña acceder como postgres: " master_pass_cl
+    echo ""
+    read -s -p "Reingrese nueva contraseña: " tmpp
+    if [[ "$master_pass_cl" != "$tmpp" ]]
+    then
+        echo "Error: Contraseñas no coinciden."
+    fi
+done
+echo ""
+echo -n "Modificando contraseña en cluster: "
+echo "$user_pass" | sudo -S su postgres -c "psql -c \"alter user postgres with encrypted password '$master_pass_cl';\"" > /dev/null 2>&1
+check $? "Problemas al modificar contraseña de postgres en cluster. Saliendo..."
+
+
+##################################
+#   Postgres/Maestro/rc
+##################################
+
+read -p "Desea configurar postgres para que inicie el cluster por defecto? [Y/N](N) " tmp
+
+if [[ "$tmp" =~ ^[yY]$ ]]
+then
+    echo "$user_pass" | sudo -S update-rc.d -f postgresql remove > /dev/null 2>&1
+    echo -n "Modificando update-rc: "
+    check $? "Problemas al ejecutar update-rc.d y tratar de eliminar postgres. Saliendo..."
+    echo -n "Copiando rc.local: "
+    echo "$user_pass" | sudo -S cp /etc/rc.local ./rc.local.old
+    check $? "Problemas el copiar rc.local. Saliendo..."
+    echo -n "Modificando rc.local: "
+    echo "$user_pass" | sudo -S head -n -1 /etc/rc.local  > /tmp/rc.tmp && echo "su - postgres -c '/usr/lib/postgresql/9.1/bin/pg_ctl -w -D /usr/local/data/ start'" >> /tmp/rc.tmp && echo -e "\nexit 0 " >> /tmp/rc.tmp && echo "$user_pass" | sudo -S mv /tmp/rc.tmp /etc/rc.local
+else
+    echo "Recuerde que debe iniciar el cluster de forma manual o con algun otro procedimiento."
+fi
+
+##################################
+#Postgres/Maestro/postgresql.conf
+##################################
+##################################
+# Postgres/Maestro/pg_hba.conf
+##################################
+

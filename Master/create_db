@@ -1,0 +1,269 @@
+#!/bin/bash
+#set -xv
+##########################################################
+# - Base de datos con acceso localhost
+# - 
+#
+#
+##########################################################
+
+##########################################################
+
+true_or_false(){
+	if [[ "$1" =~ ^[yY]$ ]]
+	then
+		return 0
+	else
+		return 1
+	fi
+}
+
+out(){
+	echo -e $1
+	exit 1
+}
+
+check () {
+	if [[ $1 -ne '0' ]]
+	then
+		out "[FAIL]\n\t $2"
+	else
+		echo "[DONE]"
+	fi
+}
+
+assign() {
+	if [[ -z "$1" ]]
+	then
+		echo "$2"
+	else
+		echo "$1"
+	fi
+}
+
+##########################################################
+
+#########################
+# Postgres Connection   #
+#########################
+tmp='N'
+while [[ ! "$tmp" =~ ^[yY]$ ]]
+do
+	read -p "Ingrese host de la base de datos (localhost): " host
+	host=$(assign $host "localhost" )
+
+	read -p "Ingrese puerto de conexion (5432): " port
+	port=$(assign $port "5432" )
+	
+	read -p "Ingrese usuario de conexion (postgres): " user
+	user=$(assign $user "postgres" )
+	
+	pass=''
+	while [[ -z "$pass" ]]
+	do
+		read -s -p "Ingresar contraseña de conexion: " pass
+		echo ""
+	done
+
+	echo "Conexion: $user@$host:$port"
+	read -p "Estan correctos los datos de conexion? (Y/N)(N) " tmp
+done
+
+echo -n "Creando Archivo de password "
+echo "$host:$port:postgres:$user:$pass" > ~/.pgpass
+check $? "Problemas al crear el archivo"
+
+echo -n "Cambiando modo del archivo "
+chmod 0600 ~/.pgpass
+check $? "Problemas al cambiar modo del archivo ~/.pgpass"
+
+tmp="N"
+
+while [[ ! "$tmp" =~ ^[yY]$ ]]
+do
+	read -p "Nombre para la nueva base de datos: " bd_name
+	read -p "Esta correcto el nombre de base de datos \"$bd_name\" ?(Y/N)[N] " tmp
+done
+
+echo "Verificando la existencia de alguna base de datos llamada \"$bd_name\""
+bd_count=$(psql -U $user -h $host -w -l | awk '{print $1}' | grep $bd_name)
+
+if [ "$bd_count" != "" ]; then
+	echo -e "Existen las siguientes bases de datos con nombres similares\n $bd_count\n"
+	tmp='N'
+	read -p "Aun desea crear $bd_name (Y/N)[N] " tmp
+
+	true_or_false $tmp
+	if [[ $? ]]; then
+		bd_count=$(psql -U $user -h $host -w -l | awk '{print $1}' | grep "^$bd_name$" | wc -l)
+		if [[ $bd_count == 0 ]]
+		then
+			psql -U $user -h $host -p $port -w -c "create database $bd_name"
+			check $? "Problemas al crear la base de datos \"$bd_name\""
+		else
+			read -p "Desea crear \"$bd_name\". Esto eliminara cualquier dato existente (Y/N)[N] " tmp
+			true_or_false $tmp
+			if [[ $? ]]
+			then
+				echo -n "Borrando base de datos \"inducom\" "
+				psql -U $user -h $host -w -c "drop database $bd_name" > /dev/null 2>&1
+				check $? "Problemas al borrar antigua base \"inducom\" "
+				echo -n "Creando base de datos \"inducom\" "
+				psql -U $user -h $host -w -c "create database $bd_name" > /dev/null 2>&1
+				check $? "Problemas al crear la base de datos \"$bd_name\""
+			else
+				out "[FAIL] No se creará \"$bd_name\". Saliendo..."
+			fi
+		fi
+	else
+		out "[FAIL] Problemas con los nombres de la nueva base de datos. Saliendo..."
+	fi
+
+else
+	echo -n "Creando base de datos \"$bd_name\": "
+	psql -U $user -h $host -w -c "create database $bd_name" > /dev/null 2>&1
+	check $? "Problemas al crear la base de datos \"$bd_name\""
+fi
+
+echo -n "Modificando archivo \"~/.pgpass\" "
+echo "$host:$port:$bd_name:$user:$pass" > ~/.pgpass
+check $? "Problemas al modificar archivo \"~/.pgpass\". Saliendo... "
+
+echo -n "Probando acceso a \"$bd_name\" " 
+psql -U $user -h $host -p $port -w $bd_name -c "\dt" > /dev/null 2>&1 
+check $? "Problemas al tratar de ingresar a \"$bd_name\". Saliendo..."
+
+echo -n "Creando tabla \"datos\" "
+psql -U $user -h $host -p $port -w $bd_name -c "
+CREATE TABLE datos(
+ft_server timestamp without time zone NOT NULL,
+ft_dato timestamp without time zone NOT NULL,
+vehiculo_id int NOT NULL,
+address varchar(30),
+lat float,
+long float,
+speed int
+);"
+
+check $? "Problemas al crear tabla \"datos\". Saliendo..."
+
+echo -n "Creando tabla \"clientes\" "
+psql -U $user -h $host -p $port -w $bd_name -c "
+create table clientes(
+ id_cliente int primary key,
+ nombre_cliente varchar(10)
+ );
+"
+check $? "Problemas al crear tabla \"clientes\". Saliendo..."
+
+echo -n "Creando tabla \"vehiculos\" "
+psql -U $user -h $host -p $port -w $bd_name -c "
+ create table vehiculos(
+ id_vehiculo int primary key,
+ id_cliente int references clientes(id_cliente),
+ vehicle_tag varchar(20)
+ );
+"
+check $? "Problemas al crear tabla \"vehiculos\". Saliendo..."
+
+echo -n "Insertando valores en tabla \"clientes\" "
+psql -U $user -h $host -p $port -w $bd_name -c "
+insert into clientes values (10,'gonzales');
+insert into clientes values (15,'hidalgo');
+insert into clientes values (20,'romo');
+"
+check $? "Problemas al insertar valores en tabla \"datos\". Saliendo..."
+
+echo -n "Insertando valores en tabla \"vehiculos\" "
+psql -U $user -h $host -p $port -w $bd_name -c "
+ INSERT INTO vehiculos values (1,10,100001);
+ INSERT INTO vehiculos values (2,10,100002);
+ INSERT INTO vehiculos values (3,10,100003);
+ INSERT INTO vehiculos values (4,10,100004);
+ INSERT INTO vehiculos values (5,10,100005);
+ INSERT INTO vehiculos values (6,15,100006);
+ INSERT INTO vehiculos values (7,15,100007);
+ INSERT INTO vehiculos values (8,15,100008);
+ INSERT INTO vehiculos values (9,15,100009);
+ INSERT INTO vehiculos values (10,15,100010);
+ INSERT INTO vehiculos values (11,20,100011);
+ INSERT INTO vehiculos values (12,20,100012);
+ INSERT INTO vehiculos values (13,20,100013);
+ INSERT INTO vehiculos values (14,20,100014);
+ INSERT INTO vehiculos values (15,20,100015);
+"
+check $? "Problemas al insertar valores en tabla \"vehiculos\". Saliendo ..."
+
+echo -n "Creando tabla \"gonzales\" "
+psql -U $user -h $host -p $port -w $bd_name -c "
+CREATE TABLE gonzales(
+ft_server timestamp without time zone NOT NULL,
+ft_dato timestamp without time zone NOT NULL,
+vehiculo_id int NOT NULL,
+address varchar(30),
+lat float,
+long float,
+speed int
+);
+"
+check $? "Problemas al crear tabla \"gonzales\". Saliendo ..."
+
+echo -n "Creando tabla \"hidalgo\" "
+psql -U $user -h $host -p $port -w $bd_name -c "
+CREATE TABLE hidalgo(
+ft_server timestamp without time zone NOT NULL,
+ft_dato timestamp without time zone NOT NULL,
+vehiculo_id int NOT NULL,
+address varchar(30),
+lat float,
+long float,
+speed int
+);
+"
+check $? "Problemas al crear tabla \"hidalgo\". Saliendo ..."
+
+echo -n "Creando tabla \"romo\" "
+psql -U $user -h $host -p $port -w $bd_name -c "
+CREATE TABLE romo(
+ft_server timestamp without time zone NOT NULL,
+ft_dato timestamp without time zone NOT NULL,
+vehiculo_id int NOT NULL,
+address varchar(30),
+lat float,
+long float,
+speed int
+);
+"
+check $? "Problemas al crear tabla \"romo\". Saliendo ..."
+
+echo -n "Creando funcion para trigger "
+psql -U $user -h $host -p $port -w $bd_name -c "
+create or replace function write_incomming() returns trigger as \$write_incomming\$
+declare
+cliente varchar(10);
+begin
+select cl.nombre_cliente into cliente from clientes cl join vehiculos ve  using (id_cliente) where ve.id_vehiculo=NEW.vehiculo_id;
+execute format('insert into %I values (\$1.ft_server,\$1.ft_dato,\$1.vehiculo_id,\$1.address,\$1.lat,\$1.long,\$1.speed)', cliente) using NEW;
+return null;
+end;
+\$write_incomming\$ LANGUAGE plpgsql;
+"
+check $? "Problemas al crear la funcion para trigger. Saliendo ..."
+
+echo -n "Creando trigger "
+psql -U $user -h $host -p $port -w $bd_name -c "
+create trigger write_incomming after insert or update on datos for each row
+execute procedure write_incomming();
+"
+check $? "Problemas al crear trigger. Saliendo ..."
+
+echo -n "Insertando dato de prueba "
+psql -U $user -h $host -p $port -w $bd_name -c "
+insert into datos values ('2013-07-19 11:52:13','2013-07-19 11:50:23',4,'los aromos por la esquina',32.423,70.342,120);
+"
+check $? "Problemas al insertar dato final de prueba. Saliendo ..."
+
+echo -n "Eliminando archivo ~/.pgpass "
+rm -rf ~/.pgpass
+
+check $? "Problemas al eliminar el archivo ~/.pgpass"
