@@ -1,0 +1,131 @@
+\documentclass[11pt]{article}
+\usepackage[spanish]{babel}
+%Gummi|063|=)
+\title{\textbf{Implementaci\'on de Hot-Standby y Stream Replication en PostgreSql}}
+\author{Juan Catal\'an Olmos\\
+		\texttt{jcatalanolmos[at]gmail[dot]com}}
+\date{\today}
+\begin{document}
+
+\maketitle
+
+\section{Definiciones y Par\'ametros}
+El presente informe es a modo de introducci\'on para la implementaci\'on de las caracter\'isticas de \textit{``Hot Standby (HS)''} y \textit{``Stream Replication (SR)''} las cuales son dos caracter\'isticas separadas pero que pueden funcionar de forma complementaria para una configuraci\'on tambi\'en conocida como \textit{\emph{``Binary Replication''}}. Ambas caracter\'isticas totalmente disponibles desde la entrega de la versi\'on de PostgreSql 9.0 en adelante.\\
+
+En el presente informe se utilizar\'an dos m\'aquinas con :
+
+\begin{itemize}
+\item Postgresql 9.1
+\item Ubuntu 12.04 LTS 32 bits
+\end{itemize}
+
+Si bien las pruebas finales se realizar\'an con distinto \textit{hardware}, la implementaci\'on final se realizar\'a con una cantidad mayor de similitudes en todo nivel (Hardware y Software) entre servidores, y sus resultados ser\'an presentados como anexo al presente. \\
+
+Ya que existen m\'ultiples fuentes que hacen referencia a los procesos de instalaci\'on de estos dos componentes, se obviar\'an estos procesos.
+
+\newpage
+
+\subsection{Beneficios}
+Dentro de las caracter\'isticas que posee esta configuraci\'on est\'an:
+\begin{itemize}
+\item Poseer una simple, pero completa capacidad de replicar una base de datos en producci\'on, concendiendo la posibilidad de una r\'apida reacci\'on ante bajasdel servicio teniendo solo unos pocos segundos de perdida de datos, incluso bajo circunstancias catastr\'oficas.
+\item Capacidad de balanceo de carga de lectura/escritura  entre el servidor maestro y sus distintos esclavos \footnote{Un error com\'un es el tratar de encontrar el valor presente en una secuencia en un servidor esclavo, esto de acuerdo a los documentos estudiados no es posible.}.
+\item Ejecutar reportes u otro tipo de consultas que implequen un largo tiempo de ejecuci\'on o carga sobre un servidor esclavo, liberando de esa cargar y trabajo al servidor principal.
+\item  Replicar todos los DDL, incluyendo tablas y cambios en los \'indices, e incluso la creaci\'on de nuevas bases de datos.
+\item Replicaci\'on de una base de datos con arquitectura \textit{multi-tenant}, evitando la especificaci\'on de requerimientos para llaves primarias o cambios en la base de datos.
+\end{itemize}
+
+\subsection{Restricciones}
+\begin{itemize}
+\item Replicar una tabla, esquema o base de datos espec\'ifica. La replicaci\'on binaria hace referencia a la instancia de PostgreSQL (o tambi\'en llamado ``Cluster'')
+\item Replicaci\'on con arquitectura Multi-Master. Una replicaci\'on binaria del tipo Multi-Master seg\'un la documentaci\'on es tecnol\'ogicamente imposible.
+\item Replicar distintas versiones de PostgreSQL o entre distintas plataformas.
+\item A\'un PostgreSQL no puede realizar replicaci\'on sin los permisos de administraci\'on requeridos en el servidor.
+\item Replicaci\'on de datos de forma sincr\'onica, garantizando llegar a evitar en su totalidad la perdida de datos, aunque esta caracter\'istica ya est\'a disponible.
+\end{itemize}
+
+Debido a las razones anteriormente mencionadas, es que se pueden utilizar otras herramientas como Slony-I, Londiste, Bucardo, pgPool2 u otros\footnote{Revisar links [5 $\vert$ 6]} para poder satisfacer otras necesidades. 
+
+\subsection{Manejo de Logs y ficheros WAL [7] }
+Cada uno de los servidores de PostgreSQL\footnote{Servidores hace referencia a la instancia de PostgreSQL, servicio o tambi\'en llamado Cluster, el cual puede contener m\'ultiples blases de datos}, posee un sistema para el registro de todas las transacciones que se realizan (en ingl\'es el \textit{``Transaction Log''}, el cu\'al est\'a ubicado en directorio de datos dentro de la carpeta \textit{PGDATA/pg\_xlog} . Este registro consiste en \textit{snapshots} binarios de la
+informaci\'on escrita hacia registros sincronizados ante cada modificaci\'on de la informaci\'on contenida en cada una de las bases de datos, en caso de que alg\'un problema inesperado interrumpa el servicio, asegurando que la informaci\'on no sea corrompida y las transacciones no completadas se pierdan.\\
+
+Tambi\'en desde la versi\'on de PostgreSQL 8.0, se pueden realizar copias de una base de datos y replicar los cambios realizados a esta base de datos maestra, conocido como \textit{``Point in Time Recovery''} tambi\'en conocido como \textit{``Log Shipping''} o \textit{Traspaso de Registros}.\\
+
+Estos registros consisten en segmentos de datos de 16MB generados desde segmentos de p\'aginas de 8K con nuevos datos\footnote{No son los procedimientos SQL o \textit{SQL Statements}}.Debido a que son datos binarios, no es posible saber las modificaciones realizadas ni el estado anterior o posterior del servidor a trav\'es del an\'alisis de estos registros.\\
+
+Estos registros adem\'as son tratados por el sistema como buffers, siendo eliminados una vez que el sistema logr\'o un estado seguro, siendo ya innecesarios para una recuperaci\'on post ca\'ida. Adem\'as, cada registro s\'olo puede ser aplicado a una base de datos \textit{binary identical} la cu\'al gener\'o el registro.\\
+
+\newpage
+
+\subsection{Tipos de Replicaci\'on}
+Para una configuraci\'on del tipo Maestro/Esclavo, se entender\'a que los registros de transacci\'on son generados por el Maestro y que el servidor secundario o esclavo es qui\'en recibe estos registros para ser aplicados de acuerdo a la configuraci\'on descrita.\\
+
+\subsubsection{PITR y Warm Standby}
+Bajo una configuraci\'on PITR, los registros transaccionales son copiados y guardados hasta que estos son requeridos, que puede ser cuando un servidor que estaba en modo secundario se ``activa o levanta'' y se comienza el proceso de restauraci\'on a trav\'es de la utilizaci\'on de estos. PITR es principalmente utilizado para realizar recuperaciones de bases de datos o an\'alisis Forence sobre estas. Tambi\'es es utilizado para realizar respaldos incrementales sobre bases de datos
+masivas, teniendo ventajas ante pg\_dump.\\
+
+En Warm Standby, los registros son copiados desde el maestro al esclavo y aplicados inmediatamente estos son recibidos. Si bien el esclavo posee casi la misma informaci\'on, ya que puede existir un pequen\~o desfase de la informaci\'on debido al traspaso y  ejecuci\'on del registro, no es posible ejecutar consultas sobre este servidor, pero en caso de ser necesario, puede ser r\'apidamente llevado a un estado completamente operacional. Esta configuraci\'on requiere la caracteristica de
+Traspaso de Registros, y es comunmente utilizada como respaldo ante fallas.\\
+
+\subsubsection{Hot Standby [3]}
+Esta configuraci\'on es b\'asicamente identica a Warm Standby, pero adem\'as se le agrega la ventaja que el esclavo adem\'as puede recibir carga a trav\'es de consultas de lectura, permitiendo distribuir carga a nivel de consultas de lectura.\\
+
+``HS'' solamente requiere cierto espacio en el maestro y posee, te\'oricamente, escalabilidad infinita. Un WAL\footnote{WAL: Write Ahead Log} puede ser distribuido entre varios servidores a trav\'es de distintos m\'etodos ya sea a trav\'es de NAS o por SFTP. A\'un as\'i, debido a que la replicacio\'on es realizada a trav\'es del traspaso de registros de 16MB, el esclavo puede encontrarse a minutos de diferencia del principal, causando conflictos ya sea ante una recuperaci\'on o
+para el balance de cargas.\\
+
+\subsubsection{Stream Replication [4]}
+
+``SR'' mejora todas las otras configuraci\'ones con la utilizaci\'on de una conexi\'on por red entre las bases de datos del Esclavo y el Maestro, en vez de mover los registros de 16MB. Esto permite que los cambios se pasen a trav\'es de la red de forma casi inmediata luego de haber sido completados en el Maestro, pero a diferencia de ``HS'', coloca cierto nivel carga sobre el Maestro y se debe poseer la capacidad de crear estas conexiones.\\
+
+Bajo esta configuraci\'on, tanto en el Maestro como el Esclavo se inician procesos especiales llamados \textit{``walsender''} y \textit{``walreceiver''} los cuales son los encargados de transmitir las p\'aginas de datos por la red, requiriendo una conexi\'on con bastante movimiento por cada esclavo que se anexe al Maestro, generando una carga incremental de acorde aumenten los esclavos. A\'un as\'i la carga sigue siendo baja permitiendo anexar y soportar
+varios esclavos f\'acilmente.\\
+
+A\'un cuando esta configuraci\'on no requiere el traspaso de registros para una operaci\'on normal, puede ser necesario la realizaci\'on de estos para iniciar la replicaci\'on o en caso de comenzar a retrasarse a nivel de datos el Esclavo con respecto al Maestro.\\
+
+\section{Implementaci\'on}
+Para esta configuraci\'on, es necesario cumplir por lo menos con los siguientes prerequisitos:
+
+\begin{itemize}
+\item 2 o m\'as servidores con similares sistemas operativos, como Ubuntu 12.04 LTS 32 bits.
+\item La misma versi\'on de PostgreSql 9.X en todos los servidores.
+\item Acceso a shell de PostgreSql como superusuario en PostgreSQL en todos los servidores.
+\item Conocimientos de como iniciar, detener y recargar las configuraciones en Postgresql.
+\item A lo menos PostgreSQL 9.0 corriendo en el servidor Principal.
+\item Una base de datos en el Servidor Primario.
+\item Acceso como usuario postgres o root en los servidores con acceso a la red. 
+\end{itemize}
+
+Adem\'as es altamente recomendable manejar llaves ssh entre los usuarios postgres para poder acceder sin problemas entre ambos servidores.
+
+\subsection{Quick Start}
+Para la implementaci\'on de par de servidores de postgresql para realizar \textit{``HR''} y \textit{``SR''} es necesario realizar los siguientes pasos:
+
+\begin{enumerate}
+\item Instalar los requerimientos necesarios para la base de datos.
+\item Inicializar la base de datos y realizar una copia binaria de la misma.
+\item Configurar el servidor primario. Modificar postgresql.conf y pg\_hba.conf.
+\item Configurar el(los) Servidor(es) secundario(s). Modificar postgresql.conf y crear recovery.conf
+\item Iniciar los servidores
+\end{enumerate}
+
+\subsection{Implementaci\'on Detallada}
+Se anexar\'a una vez que se impelemente en su totalidad la configuraci\'on.\\
+
+
+\newpage
+
+\section{Bibliograf\'ia}
+Los siguientes son links que se recomienda revisar y desear conocer:
+\begin{enumerate}
+\item http://www.postgresql.org/docs/current/static/warm-standby.html
+\item http://www.postgresql.org/docs/current/static/hot-standby.html
+\item http://wiki.postgresql.org/wiki/Hot\_Standby
+\item http://wiki.postgresql.org/wiki/Streaming\_Replication
+\item http://stackoverflow.com/questions/12764981/which-built-in-postgres-replication-fits-my-django-based-use-case-best
+\item http://wiki.postgresql.org/wiki/Replication,\_Clustering,\_and\_Connection\_Pooling
+\item http://wiki.postgresql.org/wiki/Binary\_Replication\_Tutorial
+\item http://www.postgresql.org/docs/current/static/warm-standby.html\#SYNCHRONOUS-REPLICATION
+\item http://www.postgresql.org/docs/9.2/static/runtime-config-replication.html
+\end{enumerate}
+\end{document}
