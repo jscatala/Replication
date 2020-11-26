@@ -26,3 +26,7 @@ Content:
 	run_test
 	receiver.py
 	sender.py
+
+Changelog:
+==========
+
